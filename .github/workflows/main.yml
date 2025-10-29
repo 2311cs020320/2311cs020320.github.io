@@ -22,59 +22,42 @@ jobs:
           # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           
-          # For testing, allow any incoming connection on port 3389
+          # Allow incoming connection on port 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          # Restart Remote Desktop service
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Random American Name
+      - name: Create RDP User with Random American Name
         shell: powershell
         run: |
-          # --- Random "American" name lists (first + last) ---
-          $firstNames = @(
-            "James","John","Robert","Michael","David","William","Richard","Joseph","Thomas","Charles",
-            "Christopher","Daniel","Matthew","Anthony","Donald","Mark","Paul","Steven","Andrew","Kenneth",
-            "Joshua","Kevin","Brian","George","Edward","Ronald","Timothy","Jason","Jeffrey","Ryan",
-            "Jacob","Eric","Stephen","Justin","Scott","Brandon","Benjamin","Samuel","Gregory","Frank"
-          )
+          # --- Random American Names ---
+          $firstNames = @("James","John","Robert","Michael","William","David","Richard","Joseph","Thomas","Charles","Christopher","Daniel","Matthew","Anthony","Donald","Mark","Paul","Steven","Andrew","Kenneth","Joshua","Kevin","Brian","George","Edward","Ronald","Timothy","Jason","Jeffrey","Ryan","Jacob","Eric","Stephen","Justin","Scott","Brandon","Benjamin","Samuel","Gregory","Frank","Emma","Olivia","Sophia","Isabella","Ava","Mia","Charlotte","Amelia","Harper","Evelyn")
+          $lastNames  = @("Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","Davis","Rodriguez","Martinez","Hernandez","Lopez","Gonzalez","Wilson","Anderson","Thomas","Taylor","Moore","Jackson","Martin","Lee","Perez","Thompson","White","Harris","Sanchez","Clark","Ramirez","Lewis","Robinson","Walker","Young","Allen","King","Wright","Scott","Torres","Nguyen","Hill","Flores")
 
-          $lastNames = @(
-            "Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","Davis","Rodriguez","Martinez",
-            "Hernandez","Lopez","Gonzalez","Wilson","Anderson","Thomas","Taylor","Moore","Jackson","Martin",
-            "Lee","Perez","Thompson","White","Harris","Sanchez","Clark","Ramirez","Lewis","Robinson",
-            "Walker","Young","Allen","King","Wright","Scott","Torres","Nguyen","Hill","Flores"
-          )
-
-          # Pick random first & last name
           $first = $firstNames | Get-Random
-          $last  = $lastNames  | Get-Random
+          $last  = $lastNames | Get-Random
           $fullName = "$first $last"
-
-          # Build a username from FirstLast, remove non-alphanumerics and limit length
           $candidate = ($first + $last) -replace '[^A-Za-z0-9]',''
           if ($candidate.Length -gt 20) { $candidate = $candidate.Substring(0,20) }
 
-          # Ensure username uniqueness (append a short number if collision)
+          # Ensure username is unique
           $username = $candidate
           $attempt = 0
           while (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
               $attempt++
-              $suffix = Get-Random -Minimum 10 -Maximum 99
-              $username = ($candidate + $suffix)
-              if ($username.Length -gt 20) { $username = $username.Substring(0,20) }
+              $username = "$candidate$((Get-Random -Minimum 10 -Maximum 99))"
               if ($attempt -gt 10) { Write-Error "Unable to find unique username"; exit 1 }
           }
 
-          # --- Strong password generation (16 chars; mix of categories) ---
+          # --- Strong password generation ---
           Add-Type -AssemblyName System.Security
           $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # specials
+              Upper   = [char[]](65..90)
+              Lower   = [char[]](97..122)
+              Number  = [char[]](48..57)
+              Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
           }
           $rawPassword = @()
           $rawPassword += $charSet.Upper   | Get-Random -Count 4
@@ -84,83 +67,82 @@ jobs:
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Create the local user
-          Try {
-              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -FullName $fullName -Description "Temporary RDP user created by workflow" -ErrorAction Stop
-          }
-          Catch {
-              Write-Error "Failed to create local user $username : $_"
-              exit 1
-          }
-
-          # Add to groups
+          # Create new local user
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -FullName $fullName -Description "Temporary RDP user"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
           Add-LocalGroupMember -Group "Administrators" -Member $username
 
-          # Export credentials to GitHub Actions environment for later steps
-          $credsLine = "RDP_CREDS=User: $username | Password: $password"
-          "RDP_USERNAME=$username" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $credsLine | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          # Verify creation
-          if (-not (Get-LocalUser -Name $username)) {
-              Write-Error "User creation failed"
-              exit 1
-          }
-          Write-Host "Created user: $username ($fullName)"
+          # Export credentials to environment
+          "RDP_USERNAME=$username" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RDP_CREDS=User: $username | Password: $password" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "✅ Created user: $fullName ($username)"
 
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /quiet /norestart" -Wait
+          Remove-Item $installer -Force
 
       - name: Establish Tailscale Connection
+        shell: powershell
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
+          $tailscalePath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $hostname = "gh-runner-$env:GITHUB_RUN_ID"
+
+          Write-Host "Starting Tailscale connection..."
+          if ("${{ secrets.TAILSCALE_AUTH_KEY }}" -ne "") {
+              Write-Host "Using provided TAILSCALE_AUTH_KEY..."
+              & $tailscalePath up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$hostname --accept-routes --accept-dns=false
+          } else {
+              Write-Host "No TAILSCALE_AUTH_KEY found. Generating login link..."
+              & $tailscalePath up --hostname=$hostname --accept-routes --accept-dns=false | Tee-Object -Variable output
+              $link = ($output | Select-String -Pattern 'https://login.tailscale.com.*').Matches.Value
+              if ($link) {
+                  Write-Host "`n🔗 AUTH LINK: $link"
+                  Write-Host "👉 Open this link in your browser to authenticate manually.`n"
+              } else {
+                  Write-Error "❌ Could not find login link in output."
+              }
+          }
+
+          # Wait for IP
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              $tsIP = & $tailscalePath ip -4
               Start-Sleep -Seconds 5
               $retries++
           }
-          
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
+              Write-Error "Tailscale IP not assigned. Check if device is authorized."
               exit 1
           }
+
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
+          Write-Host "✅ Tailscale connected! IP: $tsIP"
+
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "TCP connection to port 3389 failed"
               exit 1
           }
-          Write-Host "TCP connectivity successful!"
+          Write-Host "✅ TCP connectivity successful!"
 
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $env:RDP_USERNAME"
-          Write-Host "Password: $env:RDP_PASSWORD"
+          Write-Host "🔹 Address: $env:TAILSCALE_IP"
+          Write-Host "🔹 Username: $env:RDP_USERNAME"
+          Write-Host "🔹 Password: $env:RDP_PASSWORD"
           Write-Host "==================`n"
-          
-          # Keep runner active indefinitely (or until manually cancelled)
+
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Write-Host "[$(Get-Date)] RDP Active - Press Stop to terminate"
               Start-Sleep -Seconds 300
           }
